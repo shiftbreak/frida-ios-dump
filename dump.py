@@ -322,7 +322,7 @@ def open_target_app(device, name_or_bundleid, process=False):
     else:
         processes = get_processes(device)
         for process in processes:
-            if name_or_bundleid == process.name:
+            if name_or_bundleid == process.name or name_or_bundleid == str(process.pid):
                 pid = process.pid
                 display_name = process.name
                 bundle_identifier = process.name
