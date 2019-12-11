@@ -43,6 +43,28 @@ file_dict = {}
 
 finished = threading.Event()
 
+def get_tcp_iphone():
+    Type = 'tcp'
+    if int(frida.__version__.split('.')[0]) < 12:
+        Type = 'tether'
+    device_manager = frida.get_device_manager()
+    changed = threading.Event()
+
+    def on_changed():
+        changed.set()
+
+    device_manager.on('changed', on_changed)
+
+    device = None
+    while device is None:
+        device = frida.get_device_manager().add_remote_device('127.0.0.1:27042')
+        if device is None:
+            print('Waiting for TCP device...')
+            changed.wait()
+
+    device_manager.off('changed', on_changed)
+
+    return device
 
 def get_usb_iphone():
     Type = 'usb'
@@ -196,6 +218,13 @@ def get_applications(device):
 
     return applications
 
+def get_processes(device):
+    try:
+        applications = device.enumerate_processes()
+    except Exception as e:
+        sys.exit('Failed to enumerate processes: %s' % e)
+
+    return applications
 
 def list_applications(device):
     applications = get_applications(device)
@@ -222,6 +251,28 @@ def list_applications(device):
             print(line_format % (application.pid, application.name, application.identifier))
 
 
+
+def list_processes(device):
+    processes = get_processes(device)
+
+    if len(processes) > 0:
+        pid_column_width = max(map(lambda app: len('{}'.format(app.pid)), processes))
+        name_column_width = max(map(lambda app: len(app.name), processes))
+    else:
+        pid_column_width = 0
+        name_column_width = 0
+
+    header_format = '%' + str(pid_column_width) + 's  ' + '%-' + str(name_column_width) + 's'
+    print(header_format % ('PID', 'Name'))
+    print('%s  %s' % (pid_column_width * '-', name_column_width * '-'))
+    line_format = '%' + str(pid_column_width) + 's  ' + '%-' + str(name_column_width) + 's  '
+    for process in sorted(processes, key=cmp_to_key(compare_applications)):
+        if process.pid == 0:
+            print(line_format % ('-', process.name))
+        else:
+            print(line_format % (process.pid, process.name))
+
+
 def load_js_file(session, filename):
     source = ''
     with codecs.open(filename, 'r', 'utf-8') as f:
@@ -244,30 +295,44 @@ def create_dir(path):
         print(err)
 
 
-def open_target_app(device, name_or_bundleid):
+def open_target_app(device, name_or_bundleid, process=False):
     print('Start the target app {}'.format(name_or_bundleid))
 
     pid = ''
     session = None
     display_name = ''
     bundle_identifier = ''
-    for application in get_applications(device):
-        if name_or_bundleid == application.identifier or name_or_bundleid == application.name:
-            pid = application.pid
-            display_name = application.name
-            bundle_identifier = application.identifier
+    if not process:
+        applications = get_applications(device)
+        for application in applications:
+            if name_or_bundleid == application.identifier or name_or_bundleid == application.name:
+                pid = application.pid
+                display_name = application.name
+                bundle_identifier = application.identifier
 
-    try:
-        if not pid:
-            pid = device.spawn([bundle_identifier])
+        try:
+            if not pid:
+                pid = device.spawn([bundle_identifier])
+                session = device.attach(pid)
+                device.resume(pid)
+            else:
+                session = device.attach(pid)
+        except Exception as e:
+            print(e) 
+    else:
+        processes = get_processes(device)
+        for process in processes:
+            if name_or_bundleid == process.name:
+                pid = process.pid
+                display_name = process.name
+                bundle_identifier = process.name
+        try:
             session = device.attach(pid)
-            device.resume(pid)
-        else:
-            session = device.attach(pid)
-    except Exception as e:
-        print(e) 
+        except Exception as e:
+            print(e) 
 
-    return session, display_name, bundle_identifier
+
+        return session, display_name, bundle_identifier
 
 
 def start_dump(session, ipa_name):
@@ -286,7 +351,12 @@ def start_dump(session, ipa_name):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='frida-ios-dump (by AloneMonkey v2.0)')
     parser.add_argument('-l', '--list', dest='list_applications', action='store_true', help='List the installed apps')
+    parser.add_argument('-p', '--processes', dest='list_processes', action='store_true', help='List running processes')
+    parser.add_argument('-a', '--attach', dest='attach', action='store_true', help='Attach to running process')
+
     parser.add_argument('-o', '--output', dest='output_ipa', help='Specify name of the decrypted IPA')
+    parser.add_argument('-k', '--key', dest='ssh_key', help='Specify SSH private key file')
+    parser.add_argument('-t', '--tcp', action='store_true', dest='tcp', help='Use TCP instead 127.0.0.1:27042')
     parser.add_argument('target', nargs='?', help='Bundle identifier or display name of the target app')
     args = parser.parse_args()
 
@@ -297,10 +367,15 @@ if __name__ == '__main__':
         parser.print_help()
         sys.exit(exit_code)
 
-    device = get_usb_iphone()
+    if args.tcp:
+        device = get_tcp_iphone()
+    else:
+        device = get_usb_iphone()
 
     if args.list_applications:
         list_applications(device)
+    elif args.list_processes:
+        list_processes(device)
     else:
         name_or_bundleid = args.target
         output_ipa = args.output_ipa
@@ -308,10 +383,22 @@ if __name__ == '__main__':
         try:
             ssh = paramiko.SSHClient()
             ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-            ssh.connect(Host, port=Port, username=User, password=Password)
+            if args.ssh_key:
+                try:
+                    key = paramiko.DSSKey.from_private_key_file(args.ssh_key)
+                except paramiko.ssh_exception.SSHException:
+                    try:
+                        key = paramiko.RSAKey.from_private_key_file(args.ssh_key)
+                    except paramiko.ssh_exception.SSHException:
+                        print("Could not load private key, try converting it with: ssh-keygen -p -m PEM -f ~/.ssh/id_rsa")
+                        exit(1)
+
+                ssh.connect(Host, port=Port, username=User, pkey=key)
+            else:
+                ssh.connect(Host, port=Port, username=User, password=Password)
 
             create_dir(PAYLOAD_PATH)
-            (session, display_name, bundle_identifier) = open_target_app(device, name_or_bundleid)
+            (session, display_name, bundle_identifier) = open_target_app(device, name_or_bundleid, process=args.attach)
             if output_ipa is None:
                 output_ipa = display_name
             output_ipa = re.sub('\.ipa$', '', output_ipa)
