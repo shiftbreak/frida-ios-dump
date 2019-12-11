@@ -1,13 +1,17 @@
 # frida-ios-dump
-Pull a decrypted IPA from a jailbroken device
+Pull a decrypted IPA from a jailbroken device. On a Windows WSL host where frida-ps -U isn't working. This version supports:
 
-
+ * attaching to PID as well as application bundle name.
+ * connect to device using TCP rather than USB
+ 
 ## Usage
 
  1. Install [frida](http://www.frida.re/) on device
- 2. `sudo pip install -r requirements.txt --upgrade`
- 3. Run usbmuxd/iproxy SSH forwarding over USB (Default 2222 -> 22). e.g. `iproxy 2222 22`
- 4. Run ./dump.py `Display name` or `Bundle identifier`
+ 2. run frida on device e.g. `./frida-server -v -l 127.0.0.1:27042`
+ 3. `sudo pip3 install -r requirements.txt --upgrade`
+ 4. Run usbmuxd/iproxy SSH forwarding over USB (Default 2222 -> 22). e.g. `iproxy 2222 22`
+ 5. Run usbmuxd/iproxy SSH forwarding over USB (Default 27042 -> 27042). e.g. `iproxy 27042 27042`
+ 6. Run ./dump.py -t -a -k <location of private key> `Display name` or `Bundle identifier`
 
 For SSH/SCP make sure you have your public key added to the target device's ~/.ssh/authorized_keys file.
 
